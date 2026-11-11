@@ -132,7 +132,7 @@ func NewFetcher(opts FetchOptions) *Fetcher {
 	if opts.BackoffBase <= 0 {
 		opts.BackoffBase = DefaultFetchOptions.BackoffBase
 	}
-	if opts.MinIntervalPerHost <= 0 {
+	if opts.MinIntervalPerHost < 0 {
 		opts.MinIntervalPerHost = DefaultFetchOptions.MinIntervalPerHost
 	}
 	if opts.MaxConcurrency <= 0 {

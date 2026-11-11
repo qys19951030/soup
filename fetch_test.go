@@ -234,7 +234,7 @@ func TestNewFetcherAppliesDefaults(t *testing.T) {
 	assert.Equal(t, DefaultFetchOptions.MaxBodyBytes, fetcher.opts.MaxBodyBytes)
 	assert.Equal(t, DefaultFetchOptions.MaxRetries, fetcher.opts.MaxRetries)
 	assert.Equal(t, DefaultFetchOptions.BackoffBase, fetcher.opts.BackoffBase)
-	assert.Equal(t, DefaultFetchOptions.MinIntervalPerHost, fetcher.opts.MinIntervalPerHost)
+	assert.Equal(t, time.Duration(0), fetcher.opts.MinIntervalPerHost)
 	assert.Equal(t, DefaultFetchOptions.MaxConcurrency, fetcher.opts.MaxConcurrency)
 }
 
