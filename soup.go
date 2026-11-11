@@ -7,14 +7,15 @@ package soup
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/http/httputil"
 	netURL "net/url"
 	"regexp"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
@@ -84,7 +85,25 @@ var (
 
 	// Cookies contains all HTTP cookies to send
 	Cookies = make(map[string]string)
+
+	// globalsMu guards concurrent access to Headers and Cookies.
+	globalsMu sync.RWMutex
+
+	// maxTraversalDepth limits the depth of the iterative DOM traversals used
+	// by Find/FindAll and their strict variants. Zero means no limit.
+	maxTraversalDepth = 0
 )
+
+// SetMaxTraversalDepth sets the maximum element depth that Find, FindAll and
+// their strict variants are allowed to traverse. A value of zero restores
+// the default behavior of traversing the whole document without a limit.
+func SetMaxTraversalDepth(depth int) {
+	maxTraversalDepth = depth
+}
+
+// ErrMaxTraversalDepth is returned when a DOM traversal reaches the depth
+// configured through SetMaxTraversalDepth before completing.
+var ErrMaxTraversalDepth = errors.New("maximum traversal depth exceeded")
 
 // SetDebug sets the debug status
 // Setting this to true causes the panics to be thrown and logged onto the console.
@@ -95,11 +114,15 @@ func SetDebug(d bool) {
 
 // Header sets a new HTTP header
 func Header(n string, v string) {
+	globalsMu.Lock()
+	defer globalsMu.Unlock()
 	Headers[n] = v
 }
 
 // Cookie sets a cookie for http requests
 func Cookie(n string, v string) {
+	globalsMu.Lock()
+	defer globalsMu.Unlock()
 	Cookies[n] = v
 }
 
@@ -128,7 +151,7 @@ func GetWithClient(url string, client *http.Client) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	bytes, err := ioutil.ReadAll(utf8Body)
+	bytes, err := io.ReadAll(utf8Body)
 	if err != nil {
 		if debug {
 			panic("Unable to read the response body")
@@ -140,6 +163,8 @@ func GetWithClient(url string, client *http.Client) (string, error) {
 
 // setHeadersAndCookies helps build a request
 func setHeadersAndCookies(req *http.Request) {
+	globalsMu.RLock()
+	defer globalsMu.RUnlock()
 	// Set headers
 	for hName, hValue := range Headers {
 		req.Header.Set(hName, hValue)
@@ -219,7 +244,7 @@ func PostWithClient(url string, bodyType string, body interface{}, client *http.
 		return "", newError(ErrCreatingPostRequest, "couldn't perform POST request to "+url)
 	}
 	defer resp.Body.Close()
-	bytes, err := ioutil.ReadAll(resp.Body)
+	bytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		if debug {
 			panic("Unable to read the response body")
@@ -246,31 +271,41 @@ func Get(url string) (string, error) {
 
 // HTMLParse parses the HTML returning a start pointer to the DOM
 func HTMLParse(s string) Root {
-	r, err := html.Parse(strings.NewReader(s))
+	r, err := parseDocument(s)
 	if err != nil {
 		if debug {
 			panic("Unable to parse the HTML")
 		}
 		return Root{Error: newError(ErrUnableToParse, "unable to parse the HTML")}
 	}
-	for r.Type != html.ElementNode {
-		switch r.Type {
-		case html.DocumentNode:
-			r = r.FirstChild
-		case html.DoctypeNode:
-			r = r.NextSibling
-		case html.CommentNode:
-			r = r.NextSibling
+	// Inputs without any element node (empty strings, comments only,
+	// whitespace) must surface ErrUnableToParse instead of a nil Root.
+	if !hasRealElementNode(r) {
+		if debug {
+			panic("Unable to parse the HTML")
 		}
+		return Root{Error: newError(ErrUnableToParse, "unable to parse the HTML: no element nodes found")}
 	}
-	return Root{Pointer: r, NodeValue: r.Data}
+	// The first element child of the document is the root element: the
+	// synthetic <html> for regular documents, or the parsed element itself.
+	root := r.FirstChild
+	for root != nil && root.Type != html.ElementNode {
+		root = root.NextSibling
+	}
+	return Root{Pointer: root, NodeValue: root.Data}
 }
 
 // Find finds the first occurrence of the given tag name,
 // with or without attribute key and value specified,
 // and returns a struct with a pointer to it
 func (r Root) Find(args ...string) Root {
-	temp, ok := findOnce(r.Pointer, args, false, false)
+	temp, ok, err := findOnce(r.Pointer, args, false)
+	if err != nil {
+		if debug {
+			panic(err)
+		}
+		return Root{Error: err}
+	}
 	if ok == false {
 		if debug {
 			panic("Element `" + args[0] + "` with attributes `" + strings.Join(args[1:], " ") + "` not found")
@@ -285,7 +320,7 @@ func (r Root) Find(args ...string) Root {
 // and returns an array of structs, each having
 // the respective pointers
 func (r Root) FindAll(args ...string) []Root {
-	temp := findAllofem(r.Pointer, args, false)
+	temp, _ := findAllofem(r.Pointer, args, false)
 	if len(temp) == 0 {
 		if debug {
 			panic("Element `" + args[0] + "` with attributes `" + strings.Join(args[1:], " ") + "` not found")
@@ -302,7 +337,13 @@ func (r Root) FindAll(args ...string) []Root {
 // FindStrict finds the first occurrence of the given tag name
 // only if all the values of the provided attribute are an exact match
 func (r Root) FindStrict(args ...string) Root {
-	temp, ok := findOnce(r.Pointer, args, false, true)
+	temp, ok, err := findOnce(r.Pointer, args, true)
+	if err != nil {
+		if debug {
+			panic(err)
+		}
+		return Root{Error: err}
+	}
 	if ok == false {
 		if debug {
 			panic("Element `" + args[0] + "` with attributes `" + strings.Join(args[1:], " ") + "` not found")
@@ -315,7 +356,7 @@ func (r Root) FindStrict(args ...string) Root {
 // FindAllStrict finds all occurrences of the given tag name
 // only if all the values of the provided attribute are an exact match
 func (r Root) FindAllStrict(args ...string) []Root {
-	temp := findAllofem(r.Pointer, args, true)
+	temp, _ := findAllofem(r.Pointer, args, true)
 	if len(temp) == 0 {
 		if debug {
 			panic("Element `" + args[0] + "` with attributes `" + strings.Join(args[1:], " ") + "` not found")
@@ -390,12 +431,15 @@ func (r Root) FindPrevElementSibling() Root {
 	return p.FindPrevElementSibling()
 }
 
-// Children returns all direct children of this DOME element.
+// Children returns all direct element children of this DOM element.
+// Text and comment nodes are excluded.
 func (r Root) Children() []Root {
 	child := r.Pointer.FirstChild
 	var children []Root
 	for child != nil {
-		children = append(children, Root{Pointer: child, NodeValue: child.Data})
+		if child.Type == html.ElementNode {
+			children = append(children, Root{Pointer: child, NodeValue: child.Data})
+		}
 		child = child.NextSibling
 	}
 	return children
@@ -482,72 +526,6 @@ func (r Root) FullText() string {
 
 func matchElementName(n *html.Node, name string) bool {
 	return name == "" || name == n.Data
-}
-
-// Using depth first search to find the first occurrence and return
-func findOnce(n *html.Node, args []string, uni bool, strict bool) (*html.Node, bool) {
-	if n == nil {
-		return nil, false
-	}
-	if uni == true {
-		if n.Type == html.ElementNode && matchElementName(n, args[0]) {
-			if len(args) > 1 && len(args) < 4 {
-				for i := 0; i < len(n.Attr); i++ {
-					attr := n.Attr[i]
-					searchAttrName := args[1]
-					searchAttrVal := args[2]
-					if (strict && attributeAndValueEquals(attr, searchAttrName, searchAttrVal)) ||
-						(!strict && attributeContainsValue(attr, searchAttrName, searchAttrVal)) {
-						return n, true
-					}
-				}
-			} else if len(args) == 1 {
-				return n, true
-			}
-		}
-	}
-	uni = true
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		p, q := findOnce(c, args, true, strict)
-		if q != false {
-			return p, q
-		}
-	}
-	return nil, false
-}
-
-// Using depth first search to find all occurrences and return
-func findAllofem(n *html.Node, args []string, strict bool) []*html.Node {
-	if n == nil {
-		return nil
-	}
-	var nodeLinks = make([]*html.Node, 0, 10)
-	var f func(*html.Node, []string, bool)
-	f = func(n *html.Node, args []string, uni bool) {
-		if uni == true {
-			if n.Type == html.ElementNode && matchElementName(n, args[0]) {
-				if len(args) > 1 && len(args) < 4 {
-					for i := 0; i < len(n.Attr); i++ {
-						attr := n.Attr[i]
-						searchAttrName := args[1]
-						searchAttrVal := args[2]
-						if (strict && attributeAndValueEquals(attr, searchAttrName, searchAttrVal)) ||
-							(!strict && attributeContainsValue(attr, searchAttrName, searchAttrVal)) {
-							nodeLinks = append(nodeLinks, n)
-						}
-					}
-				} else if len(args) == 1 {
-					nodeLinks = append(nodeLinks, n)
-				}
-			}
-		}
-		uni = true
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			f(c, args, true)
-		}
-	}
-	f(n, args, false)
-	return nodeLinks
 }
 
 // attributeAndValueEquals reports when the html.Attribute attr has the same attribute name and value as from
