@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -249,4 +250,29 @@ func TestFetcherRetriesNetworkErrors(t *testing.T) {
 	_, err := fetcher.Get(context.Background(), ts.URL)
 	require.Error(t, err)
 	assert.Less(t, time.Since(start).Milliseconds(), int64(2000))
+}
+
+func TestGlobalHeadersAndCookiesAreRaceSafe(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer ts.Close()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(3)
+		go func(i int) {
+			defer wg.Done()
+			Header("X-Idx", strconv.Itoa(i))
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			Cookie("session", strconv.Itoa(i))
+		}(i)
+		go func() {
+			defer wg.Done()
+			_, _ = GetWithClient(ts.URL, ts.Client())
+		}()
+	}
+	wg.Wait()
 }

@@ -44,6 +44,25 @@ func TestFindByAttributePresence(t *testing.T) {
 	assert.Equal(t, ErrElementNotFound, missing.Error.(Error).Type)
 }
 
+func TestFindStrictTwoArgAttributePresence(t *testing.T) {
+	doc := HTMLParse(attributePresenceHTML)
+
+	found := doc.FindStrict("a", "name")
+	assert.Nil(t, found.Error)
+	assert.Equal(t, "two", found.Text())
+
+	all := doc.FindAllStrict("div", "data-track")
+	assert.Equal(t, 1, len(all))
+	assert.Equal(t, "d1", all[0].Attrs()["id"])
+}
+
+func TestDefaultTraversalDepthIsUnlimited(t *testing.T) {
+	assert.Equal(t, 0, maxTraversalDepth)
+	doc := HTMLParse(`<html><body><div><div><div><span>deep</span></div></div></div></body></html>`)
+	assert.Nil(t, doc.Find("span").Error)
+	assert.Len(t, doc.FindAll("div"), 3)
+}
+
 func TestFindAllDeduplicatesElements(t *testing.T) {
 	doc := HTMLParse(attributePresenceHTML)
 
