@@ -263,6 +263,26 @@ func TestCrawlContextCancellation(t *testing.T) {
 	assert.NotContains(t, stack, "processPageWithLinks")
 }
 
+func TestCrawlCancellationReturnsPartialPages(t *testing.T) {
+	release := make(chan struct{})
+	ts := newCrawlTestServer(t, func(mux *http.ServeMux) {
+		mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
+			<-release
+		})
+	})
+	t.Cleanup(func() { close(release) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	// /b is a fast page that should complete before the slow one is canceled.
+	pages, _, err := Crawl(ctx, []string{ts.URL + "/slow", ts.URL + "/b"}, fastCrawlOptions())
+	assert.True(t, errors.Is(err, context.Canceled), "expected context.Canceled, got %v", err)
+	assert.NotEmpty(t, pages)
+}
+
 func TestCrawlNonHTTPLinksDropped(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -327,4 +347,21 @@ func TestCrawlDifferentHostsProgressInParallel(t *testing.T) {
 		t.Fatal("requests to different hosts did not run in parallel")
 	}
 	<-done
+}
+
+func TestCrawlNormalizesDefaultPortAndFragment(t *testing.T) {
+	ts := newCrawlTestServer(t)
+	base := strings.TrimPrefix(ts.URL, "http://")
+	portURL := "http://" + base + "/b#section"
+	plainURL := "http://" + base + "/b"
+
+	normalized, err := NormalizeURL(portURL, "")
+	require.NoError(t, err)
+	assert.Equal(t, plainURL, normalized)
+
+	opts := fastCrawlOptions()
+	pages, stats, err := Crawl(context.Background(), []string{portURL, plainURL}, opts)
+	require.NoError(t, err)
+	assert.Len(t, pages, 1)
+	assert.GreaterOrEqual(t, stats.Duplicates, 1)
 }
