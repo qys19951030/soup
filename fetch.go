@@ -161,15 +161,16 @@ func (f *Fetcher) hostStateFor(host string) *hostState {
 	return state
 }
 
-// waitForHostSlot blocks until at least MinIntervalPerHost has elapsed since
-// the previous request to host started, or until ctx is canceled.
-func (f *Fetcher) waitForHostSlot(ctx context.Context, host string) error {
+// acquireHostSlot blocks until at least MinIntervalPerHost has elapsed since
+// the previous request to host started. The returned release function must be
+// called when the request finishes: the host lock is held for the whole
+// request so concurrent starts cannot fall inside the configured interval.
+func (f *Fetcher) acquireHostSlot(ctx context.Context, host string) (func(), error) {
 	if f.opts.MinIntervalPerHost <= 0 {
-		return ctx.Err()
+		return func() {}, ctx.Err()
 	}
 	state := f.hostStateFor(host)
 	state.mu.Lock()
-	defer state.mu.Unlock()
 
 	now := time.Now()
 	if !state.lastAt.IsZero() {
@@ -179,13 +180,14 @@ func (f *Fetcher) waitForHostSlot(ctx context.Context, host string) error {
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				return ctx.Err()
+				state.mu.Unlock()
+				return nil, ctx.Err()
 			case <-timer.C:
 			}
 		}
 	}
 	state.lastAt = time.Now()
-	return nil
+	return func() { state.mu.Unlock() }, nil
 }
 
 // limitedReadAll reads from r while enforcing a maximum body size. It returns
@@ -249,17 +251,20 @@ func (f *Fetcher) Get(ctx context.Context, rawurl string) (*Response, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if err := f.waitForHostSlot(ctx, host); err != nil {
+		releaseHost, err := f.acquireHostSlot(ctx, host)
+		if err != nil {
 			return nil, err
 		}
 
 		select {
 		case f.sem <- struct{}{}:
 		case <-ctx.Done():
+			releaseHost()
 			return nil, ctx.Err()
 		}
 		resp, attemptErr := f.doAttempt(ctx, rawurl, attempt+1)
 		<-f.sem
+		releaseHost()
 
 		if attemptErr != nil {
 			lastErr = attemptErr

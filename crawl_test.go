@@ -334,7 +334,6 @@ func TestCrawlDifferentHostsProgressInParallel(t *testing.T) {
 	opts := fastCrawlOptions()
 	opts.Concurrency = 2
 	opts.FetchOptions.MaxConcurrency = 2
-	opts.FetchOptions.MinIntervalPerHost = time.Second
 
 	done := make(chan struct{})
 	go func() {
