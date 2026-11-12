@@ -155,12 +155,16 @@ func (d *robotsData) rulesFor(userAgent string) []robotsRule {
 // failures, including 404s, are cached as "everything allowed" per the
 // robots.txt convention.
 type robotsCache struct {
-	mu      sync.Mutex
-	entries map[string]*robotsData
+	mu       sync.Mutex
+	entries  map[string]*robotsData
+	inflight map[string]chan struct{}
 }
 
 func newRobotsCache() *robotsCache {
-	return &robotsCache{entries: make(map[string]*robotsData)}
+	return &robotsCache{
+		entries:  make(map[string]*robotsData),
+		inflight: make(map[string]chan struct{}),
+	}
 }
 
 // allowed fetches (once per host) and evaluates the robots.txt for rawurl.
@@ -174,19 +178,37 @@ func (c *robotsCache) allowed(ctx context.Context, fetcher *Fetcher, userAgent, 
 	data, ok := c.entries[host]
 	c.mu.Unlock()
 	if !ok {
-		data = c.fetch(ctx, fetcher, parsed.Scheme, host)
+		data = c.fetchOrJoin(ctx, fetcher, parsed.Scheme, host)
 	}
 	return data.allowed(userAgent, parsed.EscapedPath()), nil
 }
 
-// fetch loads and parses a host's robots.txt, caching a permissive result on
-// any failure.
-func (c *robotsCache) fetch(ctx context.Context, fetcher *Fetcher, scheme, host string) *robotsData {
+// fetchOrJoin loads a host's robots.txt once: concurrent callers join the
+// in-flight load instead of issuing duplicate requests.
+func (c *robotsCache) fetchOrJoin(ctx context.Context, fetcher *Fetcher, scheme, host string) *robotsData {
 	c.mu.Lock()
 	if data, ok := c.entries[host]; ok {
 		c.mu.Unlock()
 		return data
 	}
+	if wait, ok := c.inflight[host]; ok {
+		c.mu.Unlock()
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			// On cancellation return a permissive result without poisoning cache.
+			return &robotsData{agents: make(map[string]*robotsRules)}
+		}
+		c.mu.Lock()
+		data := c.entries[host]
+		c.mu.Unlock()
+		if data != nil {
+			return data
+		}
+		return &robotsData{agents: make(map[string]*robotsRules)}
+	}
+	ready := make(chan struct{})
+	c.inflight[host] = ready
 	c.mu.Unlock()
 
 	robotsURL := scheme + "://" + host + "/robots.txt"
@@ -198,6 +220,8 @@ func (c *robotsCache) fetch(ctx context.Context, fetcher *Fetcher, scheme, host 
 
 	c.mu.Lock()
 	c.entries[host] = data
+	delete(c.inflight, host)
 	c.mu.Unlock()
+	close(ready)
 	return data
 }
