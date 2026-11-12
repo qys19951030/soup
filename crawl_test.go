@@ -365,6 +365,27 @@ func TestCrawlNormalizesDefaultPortAndFragment(t *testing.T) {
 	assert.GreaterOrEqual(t, stats.Duplicates, 1)
 }
 
+func TestCrawlBadSeedRecordedButCrawlContinues(t *testing.T) {
+	ts := newCrawlTestServer(t)
+	opts := fastCrawlOptions()
+	pages, stats, err := Crawl(context.Background(), []string{
+		"mailto:not-a-page", ts.URL + "/b",
+	}, opts)
+	require.NoError(t, err)
+	assert.Len(t, pages, 2)
+	assert.Equal(t, 1, stats.Failed)
+	assert.Equal(t, 1, stats.Success)
+
+	var hasBadSeed bool
+	for _, page := range pages {
+		if page.URL == "mailto:not-a-page" {
+			hasBadSeed = true
+			assert.Error(t, page.Err)
+		}
+	}
+	assert.True(t, hasBadSeed)
+}
+
 func TestCrawlSameDomainDropsExternalHost(t *testing.T) {
 	external := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(page("External", "/", nil)))
