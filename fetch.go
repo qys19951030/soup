@@ -191,34 +191,32 @@ func (f *Fetcher) waitForHostSlot(ctx context.Context, host string) error {
 // limitedReadAll reads from r while enforcing a maximum body size. It returns
 // ErrBodyTooLarge (wrapped in a BodyLimitError by the caller) instead of
 // silently truncating oversized bodies.
-func limitedReadAll(r io.Reader, limit int64) ([]byte, error) {
-	wrapped := &limitReader{r: r, remaining: limit + 1}
-	data, err := io.ReadAll(wrapped)
-	if err != nil {
-		return nil, err
+func limitedReadAll(r io.Reader, limit int64) ([]byte, int64, error) {
+	buf := make([]byte, 0, min64(limit, 4096))
+	chunk := make([]byte, 4096)
+	var total int64
+	for {
+		n, err := r.Read(chunk)
+		total += int64(n)
+		if total > limit {
+			return buf, total, ErrBodyTooLarge
+		}
+		buf = append(buf, chunk[:n]...)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return buf, total, nil
+			}
+			return buf, total, err
+		}
 	}
-	if int64(len(data)) > limit {
-		return data[:limit], ErrBodyTooLarge
-	}
-	return data, nil
 }
 
-// limitReader tracks how many bytes may still be read.
-type limitReader struct {
-	r         io.Reader
-	remaining int64
-}
-
-func (l *limitReader) Read(p []byte) (int, error) {
-	if l.remaining <= 0 {
-		return 0, io.EOF
+// min64 returns the smaller of two int64 values, used for initial capacity.
+func min64(a, b int64) int64 {
+	if a < b {
+		return a
 	}
-	if int64(len(p)) > l.remaining {
-		p = p[:l.remaining]
-	}
-	n, err := l.r.Read(p)
-	l.remaining -= int64(n)
-	return n, err
+	return b
 }
 
 // isRetryableStatus reports whether an HTTP status code triggers a retry.
@@ -336,13 +334,13 @@ func (f *Fetcher) doAttempt(ctx context.Context, rawurl string, attemptNumber in
 	}
 	defer httpResp.Body.Close()
 
-	body, err := limitedReadAll(httpResp.Body, f.opts.MaxBodyBytes)
+	body, bytesRead, err := limitedReadAll(httpResp.Body, f.opts.MaxBodyBytes)
 	if err != nil {
 		if errors.Is(err, ErrBodyTooLarge) {
 			return nil, &BodyLimitError{
 				URL:       rawurl,
 				Limit:     f.opts.MaxBodyBytes,
-				BytesRead: int64(len(body)) + 1,
+				BytesRead: bytesRead,
 				Attempts:  attemptNumber,
 			}
 		}

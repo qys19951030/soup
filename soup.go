@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
@@ -91,14 +92,14 @@ var (
 
 	// maxTraversalDepth limits the depth of the iterative DOM traversals used
 	// by Find/FindAll and their strict variants. Zero means no limit.
-	maxTraversalDepth = 0
+	maxTraversalDepth atomic.Int64
 )
 
 // SetMaxTraversalDepth sets the maximum element depth that Find, FindAll and
 // their strict variants are allowed to traverse. A value of zero restores
 // the default behavior of traversing the whole document without a limit.
 func SetMaxTraversalDepth(depth int) {
-	maxTraversalDepth = depth
+	maxTraversalDepth.Store(int64(depth))
 }
 
 // ErrMaxTraversalDepth is returned when a DOM traversal reaches the depth

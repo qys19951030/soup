@@ -62,7 +62,8 @@ func pushChildren(stack []traversalFrame, node *html.Node, depth int) []traversa
 
 // depthExceeded reports whether the traversal depth limit is reached.
 func depthExceeded(depth int) bool {
-	return maxTraversalDepth > 0 && depth > maxTraversalDepth
+	limit := int(maxTraversalDepth.Load())
+	return limit > 0 && depth > limit
 }
 
 // findOnce performs an iterative depth-first search for the first matching

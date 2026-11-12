@@ -57,7 +57,7 @@ func TestFindStrictTwoArgAttributePresence(t *testing.T) {
 }
 
 func TestDefaultTraversalDepthIsUnlimited(t *testing.T) {
-	assert.Equal(t, 0, maxTraversalDepth)
+	assert.Equal(t, int64(0), maxTraversalDepth.Load())
 	doc := HTMLParse(`<html><body><div><div><div><span>deep</span></div></div></div></body></html>`)
 	assert.Nil(t, doc.Find("span").Error)
 	assert.Len(t, doc.FindAll("div"), 3)
