@@ -364,3 +364,41 @@ func TestCrawlNormalizesDefaultPortAndFragment(t *testing.T) {
 	assert.Len(t, pages, 1)
 	assert.GreaterOrEqual(t, stats.Duplicates, 1)
 }
+
+func TestCrawlSameDomainDropsExternalHost(t *testing.T) {
+	external := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(page("External", "/", nil)))
+	}))
+	t.Cleanup(external.Close)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		body := `<html><body><a href="` + external.URL + `/x">external</a>` +
+			`<a href="/local">local</a></body></html>`
+		_, _ = w.Write([]byte(body))
+	})
+	mux.HandleFunc("/local", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(page("Local", "/local", nil)))
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	opts := fastCrawlOptions()
+	opts.SameDomain = true
+	opts.MaxDepth = 1
+	pages, _, err := Crawl(context.Background(), []string{ts.URL + "/"}, opts)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{ts.URL + "/", ts.URL + "/local"}, urlsOf(pages))
+
+	// With SameDomain disabled the external host is followed.
+	opts.SameDomain = false
+	pages, _, err = Crawl(context.Background(), []string{ts.URL + "/"}, opts)
+	require.NoError(t, err)
+	found := false
+	for _, page := range pages {
+		if strings.HasPrefix(page.URL, external.URL) {
+			found = true
+		}
+	}
+	assert.True(t, found)
+}

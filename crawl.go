@@ -323,7 +323,7 @@ func hostOf(rawurl string) string {
 	if err != nil {
 		return ""
 	}
-	return parsed.Hostname()
+	return parsed.Host
 }
 
 // nodeAttr returns the value of an element attribute, reporting presence.
